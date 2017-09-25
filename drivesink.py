@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/python
 # coding: utf-8
 
 import argparse
@@ -119,33 +119,52 @@ class DriveSink(object):
         return cls._instance
 
     def upload(self, source, destination):
-	logging.info("Uploading '" + source + "' to '" + destination + "' ...")
+        logging.info("Uploading '" + source + "' to '" + destination + "' ...")
         remote_node = self.node_at_path(
             self.get_root(), destination, create_missing=True)
         for dirpath, dirnames, filenames in os.walk(source):
             relative = dirpath[len(source):]
+            #logging.info("relative: " + relative + " source: " + source + "   destination: " + destination + '  remote_node: ' + str(remote_node))
             current_dir = self.node_at_path(
                 remote_node, relative, create_missing=True)
+            #current_dir = self.node_at_path(
+            #    remote_node, str(relative), create_missing=True)
             if not current_dir:
                 logging.error("Could not create missing node")
                 sys.exit(1)
             for dirname in dirnames:
-		logging.info("Processing directory '" + dirname + "' ...")
+                logging.info("Processing directory '" + dirname + "' ...")
                 current_dir.child(dirname, create=True)
             for filename in filenames:
+                logging.info("Processing file '" + filename + "'...")
                 local_path = os.path.join(dirpath, filename)
+                #logging.info("local_path '" + local_path + "'...")
                 node = current_dir.child(filename)
-                if (not node or node.differs(
-                        local_path)) and self.filter_file(filename):
-                    n_backoff = 0
-		    while n_backoff<512:
-                        try:
-                            current_dir.upload_child_file(filename, local_path, node)
-                            break
-                        except Exception, e:
-                            logging.error("Error uploading file. We will retry. Error: " + str(e))
-                            time.sleep(2 ** n_backoff)
-                            n_backoff += 1
+                #logging.info("node '" + str(node) + "'...")
+                #if (not node or node.differs(
+                #        local_path)) and self.filter_file(filename):
+                if (not node or node.differs(local_path)):
+                    _, extension = os.path.splitext(filename)
+                    extension = extension.lstrip(".").lower()
+                    if(self.filter_file(filename)[0]):
+                        n_backoff = 0
+                        while n_backoff<512:
+                            try:
+                                #logging.info("current_dir.upload_child_file(filename, local_path, node). filename: " + filename + " local_path: " + local_path + " node: " + node + "...")
+                                current_dir.upload_child_file(filename, local_path, node)
+                                break
+                            except Exception, e:
+                                # do not exit if "409 Client Error" is received. I am focussing in application error: MD5_DUPLICATE 
+                                if str(e).split(":")[0] == "409 Client Error":
+                                    break
+                                logging.error("Error uploading file. We will retry. Error: " + str(e))
+                                time.sleep(2 ** n_backoff)
+                                n_backoff += 1
+                    else:
+                        #logging.info("INFO: invalid extension: " + extension + " not in list: " + str(self.args.extensions))
+                        logging.info("INFO: invalid extension: " + extension + " not in list: " + str(self.filter_file(filename)[1]))
+                else:
+                    logging.info("INFO: filename: " + filename + " already exists on destination: " + destination)
 
     def download(self, source, destination):
         to_download = [(self.node_at_path(self.get_root(), source),
@@ -164,20 +183,27 @@ class DriveSink(object):
     def filter_file(self, filename):
         _, extension = os.path.splitext(filename)
         extension = extension.lstrip(".").lower()
+        #print('basename(_): ' + _)
+        #print('extension: ' + extension)
 
         allowed = self.args.extensions
         if not allowed:
             # Not all tested to be free
+            # DEFAULT extensions to process
             allowed = (
                 "apng,arw,bmp,cr2,crw,dng,emf,gif,jfif,jpe,jpeg,jpg,mef,nef,"
                 "orf,pcx,png,psd,raf,ras,srw,swf,tga,tif,tiff,wmf")
-        return extension in allowed.split(",")
+        else:
+            # extensions conveyed through args
+            allowed = self.args.extensions
+        return (extension in allowed.split(","), allowed)
 
     def get_root(self):
         nodes = self.request_metadata("%snodes?filters=isRoot:true")
         if nodes["count"] != 1:
             logging.error("Could not find root")
             sys.exit(1)
+        #logging.info("nodes['data'][0]: " + str(nodes["data"][0]))
         return CloudNode(nodes["data"][0])
 
     def node_at_path(self, root, path, create_missing=False):
@@ -215,7 +241,7 @@ class DriveSink(object):
             try:
                 self.config = json.loads(open(config_filename, "r").read())
             except:
-                print "%s/config to get your tokens" % self.args.drivesink
+                print("%s/config to get your tokens" % self.args.drivesink)
                 sys.exit(1)
         return self.config
 
@@ -268,9 +294,12 @@ class DriveSink(object):
         if req.status_code != 200:
             try:
                 response = req.json()
-                logging.error("Got Amazon code %s: %s",
+                logging.error("Got Amazon code %s: %s", 
                               response["code"], response["message"])
-                sys.exit(1)
+                #TODO
+                # do not exit if filename to be uploaded already exists SOMEWHERE in ACD
+                if not response["code"] == "MD5_DUPLICATE":
+                    sys.exit(1)
             except Exception:
                 pass
         req.raise_for_status()
